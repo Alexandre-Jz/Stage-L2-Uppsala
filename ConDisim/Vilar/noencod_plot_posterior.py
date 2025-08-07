@@ -6,43 +6,40 @@ import numpy as np
 import os
 from scipy import stats
 from vilar_dataset import simulator, Vilar_Oscillator
-from gillespy2 import SSACSolver
+from gillespy2.solvers.cpp.ssa_c_solver import SSACSolver
 
-def load_results(results_dir, budget, run_num):
-
-    results_path = os.path.join('posterior_samples', f'vilar_posterior_30000_run_1.npz')
-    dataset_path = os.path.join('datasets', f'vilar_dataset_{budget}.npz')
+def load_results(npz_name, budget):
+    results_path = os.path.join('noencod_posterior_samples', npz_name)
+    dataset_path = os.path.join('datasets', f'vilar_dataset_{budget}_noencod.npz')
     
     print(f"\nAttempting to load:")
-    print(f"Results file: {results_path}")
-    print(f"Dataset file: {dataset_path}")
+    print(f" Results file:   {results_path}")
+    print(f" Dataset file:   {dataset_path}")
     
     if not os.path.exists(results_path) or not os.path.exists(dataset_path):
-        print(f"Warning: One or more required files not found:")
+        print(" Warning: One or more required files not found:")
         if not os.path.exists(results_path):
-            print(f"- Missing results file: {results_path}")
+            print(f"  - Missing results file: {results_path}")
         if not os.path.exists(dataset_path):
-            print(f"- Missing dataset file: {dataset_path}")
+            print(f"  - Missing dataset file: {dataset_path}")
         return None, None, None
     
-    try:
-        # Load posterior samples
-        print("Loading posterior samples...")
-        results = np.load(results_path, allow_pickle=True)
-        posterior_samples = results['posterior_samples']
-        print(f"Posterior samples shape: {posterior_samples.shape}")
-        
-        # Load true parameters and data
-        print("Loading dataset...")
-        data = np.load(dataset_path, allow_pickle=True)
-        true_params = data['true_theta']
-        observed_data = data['true_ts']
-        print(f"Observed data shape: {observed_data.shape}")
-        
-        return true_params, posterior_samples, observed_data
-    except Exception as e:
-        print(f"Warning: Error loading data: {str(e)}")
-        return None, None, None
+    # Posterior
+    results = np.load(results_path, allow_pickle=True)
+    print("→ contenus de", results_path, ":", results.files)
+    posterior_samples = results['posterior_samples']
+    print(f"Loaded posterior samples shape: {posterior_samples.shape}")
+    
+    # Observed data
+    data = np.load(dataset_path, allow_pickle=True)
+    true_params   = data['true_theta']
+    observed_data = data['true_ts']
+    if observed_data.ndim == 3:  # (1,3,200) → (3,200)
+        observed_data = observed_data.squeeze(0)
+    print(f"Loaded observed data shape: {observed_data.shape}")
+    
+    return true_params, posterior_samples, observed_data
+
 
 def plot_posterior_distributions(true_params, posterior_samples, save_path, budget, run_num):
     """Create KDE plots for posterior distributions."""
@@ -244,67 +241,53 @@ def plot_posterior_predictive(posterior_samples, observed_data, save_path):
     plt.savefig(save_path, format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
 
+
 def main():
-    """Generate plots for all budgets and runs."""
-    print("\nStarting plot generation...")
-    
-    # Create output directory
-    os.makedirs('vilar_plots', exist_ok=True)
-    print("Created output directory: vilar_plots/")
-    
-    # Set parameters
-    budgets = [30000]  # Single budget
-    runs = range(1, 2)  # Single run
-    
-    successful_plots = False  # Track if any plots were generated
-    
+    print("\nStarting plot generation (noencod)…")
+    os.makedirs("noencod_vilar_plots", exist_ok=True)
+
+    budgets = [20000,30000]
+    folder  = "noencod_posterior_samples"
+
     for budget in budgets:
-        for run in runs:
-            print(f"\nProcessing budget {budget}, run {run}")
-            print("-" * 50)
-            
-            # Load results
-            true_params, posterior_samples, observed_data = load_results('.', budget, run)
-            
-            # Skip if data not available
-            if true_params is None or posterior_samples is None or observed_data is None:
-                print(f"Skipping budget {budget}, run {run} due to missing data")
+        # Lister tous les NPZ pour ce budget
+        pattern = f"vilar_post_{budget}_"
+        npz_files = sorted([f for f in os.listdir(folder)
+                            if f.startswith(pattern) and f.endswith(".npz")])
+        if not npz_files:
+            print(f"No NPZ files found for budget {budget}")
+            continue
+
+        for npz_name in npz_files:
+            print(f"\n→ Processing {npz_name}")
+            # Extraire le stem sans .npz
+            stem = os.path.splitext(npz_name)[0]
+            # stem == "vilar_post_10000_20250718_153233_noencod"
+
+            # Charger
+            true_params, posterior_samples, observed_data = load_results(npz_name, budget)
+            if true_params is None:
                 continue
-            
+
             try:
-                # Generate posterior distribution plots
-                print("\nGenerating posterior distribution plots...")
-                plot_posterior_distributions(
-                    true_params,
-                    posterior_samples,
-                    f'vilar_plots/posterior_distributions_budget_{budget}_run_{run}.pdf',
-                    budget,
-                    run
-                )
-                
-                # Generate posterior predictive plots
-                print("\nGenerating posterior predictive plots...")
-                plot_posterior_predictive(
-                    posterior_samples,
-                    observed_data,
-                    f'vilar_plots/posterior_predictive_budget_{budget}_run_{run}.pdf'
-                )
-                
-                successful_plots = True
-                print(f"\nSuccessfully generated all plots for budget {budget}, run {run}")
-                print("Output files:")
-                print(f"1. vilar_plots/posterior_distributions_budget_{budget}_run_{run}.pdf")
-                print(f"2. vilar_plots/posterior_predictive_budget_{budget}_run_{run}.pdf")
-            
+                # KDE plots
+                out1 = f"noencod_vilar_plots/{stem}_dist.pdf"
+                plot_posterior_distributions(true_params,
+                                             posterior_samples,
+                                             out1,
+                                             budget, stem)
+                print("  Saved", out1)
+
+                # Predictive checks
+                out2 = f"noencod_vilar_plots/{stem}_pred.pdf"
+                plot_posterior_predictive(posterior_samples,
+                                          observed_data,
+                                          out2)
+                print("  Saved", out2)
+
             except Exception as e:
-                print(f"\nError generating plots for budget {budget}, run {run}:")
-                print(f"Error details: {str(e)}")
+                print("  Error while plotting:", e)
                 continue
-    
-    if not successful_plots:
-        print("\nWarning: No plots were generated. All data combinations were unavailable.")
-    else:
-        print("\nPlot generation complete!")
 
 if __name__ == "__main__":
     main()

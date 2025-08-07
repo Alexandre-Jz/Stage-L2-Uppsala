@@ -1,32 +1,31 @@
 import numpy as np
 import torch
 import os
-from vilar_diffusion import MLPDiffusionModel, train_diffusion_model, create_dataloaders
+from vilar_diffusion_base import MLPDiffusionModel, train_diffusion_model, create_dataloaders
 import datetime
 
 # ===== Configuration =====
 # Data parameters
-SIMULATION_BUDGETS = [20000,30000]  # Number of simulations per budget
+SIMULATION_BUDGETS = [10000,20000,30000]  # Number of simulations per budget
 RUNS_PER_BUDGET = 1          # Number of independent runs per budget
 TRAIN_SPLIT = 0.9           # Fraction of data used for training
 
 # Model architecture
-HIDDEN_DIM = 512 # Hidden dimension of MLP layers
-NUM_LAYERS = 5
-NUM_TIMESTEPS = 300         # Number of diffusion steps
+HIDDEN_DIM = 128 # Hidden dimension of MLP layers
+NUM_TIMESTEPS = 500         # Number of diffusion steps
 
 # Training parameters
-BATCH_SIZE = 128             # Batch size for training
+BATCH_SIZE = 32             # Batch size for training
 NUM_EPOCHS = 1000           # Maximum number of training epochs
-LEARNING_RATE = 0.009056311714376347        # Initial learning rate
-WEIGHT_DECAY = 9.294394155644998e-06         # Weight decay for AdamW
-PATIENCE = 35               # Early stopping patience
-LR_PATIENCE = 16             # Learning rate scheduler patience
-LR_FACTOR = 0.29011003519391976            # Learning rate reduction factor
-MIN_LR = 8.182111518618415e-05              # Minimum learning rate
+LEARNING_RATE = 0.0035688626277862226        # Initial learning rate
+WEIGHT_DECAY = 4.952067876224309e-06         # Weight decay for AdamW
+PATIENCE = 25               # Early stopping patience
+LR_PATIENCE = 5             # Learning rate scheduler patience
+LR_FACTOR = 0.5            # Learning rate reduction factor
+MIN_LR = 1e-5              # Minimum learning rate
 
 # Sampling parameters
-NUM_POSTERIOR_SAMPLES = 1000  # Number of posterior samples to generate
+NUM_POSTERIOR_SAMPLES = 10000  # Number of posterior samples to generate
 
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -53,13 +52,13 @@ def main():
                 print(f"Dataset not found: {dataset_path}")
                 continue
                 
-            data = np.load(dataset_path, allow_pickle=True)
-            theta_norm = data['theta_norm']
-            ts_embeddings = data['ts_embeddings']
-            true_theta = data['true_theta']
-            true_ts = data['true_ts']
-            true_ts_embedding = data['true_ts_embedding']
-            theta_scaler = data['theta_scaler'].item()
+            data = np.load(dataset_path, allow_pickle=True)  # Allow loading Python objects (scalers)
+            theta_norm = data['theta_norm']  # Already normalized parameters
+            ts_embeddings = data['ts_embeddings']  # Time series embeddings
+            true_theta = data['true_theta']  # Original scale parameters
+            true_ts = data['true_ts']  # Original time series
+            true_ts_embedding = data['true_ts_embedding']  # True time series embedding
+            theta_scaler = data['theta_scaler'].item()  # Get scaler
             
             print(f"Loaded data shapes:")
             print(f"- theta_norm: {theta_norm.shape}")
@@ -68,8 +67,8 @@ def main():
             
             # Create dataloaders with normalized parameters and embeddings
             train_loader, val_loader = create_dataloaders(
-                theta=theta_norm,
-                y=ts_embeddings,
+                theta=theta_norm,  # Normalized parameters
+                y=ts_embeddings,  # Time series embeddings
                 batch_size=BATCH_SIZE,
                 train_split=TRAIN_SPLIT
             )
@@ -81,8 +80,8 @@ def main():
                     # Initialize model
                     model = MLPDiffusionModel(
                         theta_dim=theta_norm.shape[1],  # Parameter dimension
+                        y_dim=ts_embeddings.shape[1],  # Embedding dimension
                         hidden_dim=HIDDEN_DIM,
-                        num_layers=NUM_LAYERS,
                         num_timesteps=NUM_TIMESTEPS
                     ).to(device)
                     
@@ -99,8 +98,8 @@ def main():
                     best_model.eval()
                     with torch.no_grad():
                         # Use true time series embedding for conditioning
-                        y_obs = torch.FloatTensor(true_ts_embedding).to(device)
-                        y_obs = y_obs.repeat(NUM_POSTERIOR_SAMPLES, 1)
+                        y_obs = torch.FloatTensor(true_ts_embedding).to(device)  # Shape: [1, embedding_dim]
+                        y_obs = y_obs.repeat(NUM_POSTERIOR_SAMPLES, 1)  # Shape: [num_samples, embedding_dim]
                         posterior_samples = best_model.sample(NUM_POSTERIOR_SAMPLES, y_obs, temperature=0.8)
                         posterior_samples = posterior_samples.cpu().numpy()
                     
@@ -125,10 +124,10 @@ def main():
                     
                     # Save results
                     save_dict = {
-                        'posterior_samples': posterior_samples,
-                        'true_theta': true_theta,
-                        'true_ts': true_ts,
-                        'true_ts_embedding': true_ts_embedding,
+                        'posterior_samples': posterior_samples,  # Denormalized
+                        'true_theta': true_theta,  # Original scale
+                        'true_ts': true_ts,  # Original scale
+                        'true_ts_embedding': true_ts_embedding,  # Time series embedding
                         'budget': budget
                     }
                     

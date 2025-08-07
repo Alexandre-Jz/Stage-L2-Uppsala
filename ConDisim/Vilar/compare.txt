@@ -1,0 +1,39 @@
+Base : 
+
+hidden_dim: 128
+num_timesteps: 500
+learning_rate: 0.0035688626277862226
+weight_decay: 4.952067876224309e-06
+batch_size: 32
+patience: 25
+
+7.07
+6.78
+6.57
+7.48
+6.72
+
+6.92
+
+FE + FILM + TE (MLP) : Best hyperparameters: {'hidden_dim': 128, 'num_layers': 6, 'num_timesteps': 500, 'batch_size': 32, 'num_epochs': 995, 'learning_rate': 0.0028417072368355158, 'weight_decay': 1.39742884805759e-05, 'patience': 27, 'lr_patience': 10, 'lr_factor': 0.3511869926187101, 'min_lr': 0.00020507162259327777} 
+
+
+AE + FILM + TE (MLP) : 
+
+HIDDEN_DIM = 512 # Hidden dimension of MLP layers
+NUM_LAYERS = 5
+NUM_TIMESTEPS = 300         # Number of diffusion steps
+
+# Training parameters
+BATCH_SIZE = 128             # Batch size for training
+NUM_EPOCHS = 1000           # Maximum number of training epochs
+LEARNING_RATE = 0.009056311714376347        # Initial learning rate
+WEIGHT_DECAY = 9.294394155644998e-06         # Weight decay for AdamW
+PATIENCE = 35               # Early stopping patience
+LR_PATIENCE = 16             # Learning rate scheduler patience
+LR_FACTOR = 0.29011003519391976            # Learning rate reduction factor
+MIN_LR = 8.182111518618415e-05 
+
+
+
+CNN, AE + CNNN, FE ?

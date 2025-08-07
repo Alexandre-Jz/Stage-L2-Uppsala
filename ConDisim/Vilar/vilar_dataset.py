@@ -1,3 +1,4 @@
+import traceback
 import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -6,6 +7,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 import torch.nn as nn
 import random
+from collections.abc import Mapping
 import multiprocessing as mp
 import time
 import copy
@@ -119,16 +121,6 @@ def generate_data_parallel(N, model, solver):
     return ts, params  # Return time series first, then parameters
 
 def save_dataset():
-    """
-    Generate and save Vilar datasets with normalized data and embeddings.
-    Process:
-    1. Generate 30k simulations
-    2. Normalize time series and parameters
-    3. Train autoencoder and generate embeddings
-    4. Generate reference data with true parameters
-    5. Save all data including scalers
-    6. Create and save 10k and 20k subsets
-    """
     # Create necessary directories
     os.makedirs('datasets', exist_ok=True)
     os.makedirs('vilar_plots', exist_ok=True)
@@ -195,7 +187,7 @@ def save_dataset():
 
     # Save the full 30k dataset
     print("\nSaving datasets...")
-    for size in [10000, 20000, 30000]:
+    for size in [20000]:
         # Take the first 'size' samples for each subset
         subset_idx = slice(0, size)
         

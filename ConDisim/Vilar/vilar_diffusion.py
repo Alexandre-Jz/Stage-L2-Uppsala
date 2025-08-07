@@ -1,222 +1,255 @@
+import math
+import copy
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
 from torch.utils.data import DataLoader, TensorDataset, random_split
-import copy
-import math
-import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def noise_schedule(num_timesteps, beta_start=0.00001, beta_end=0.005, schedule='quadratic'):
-    if schedule == 'linear':
-        beta = torch.linspace(beta_start, beta_end, num_timesteps, dtype=torch.float32)
-    elif schedule == 'quadratic':
-        beta = torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps, dtype=torch.float32) ** 2
-    elif schedule == 'cosine':
-        beta = torch.tensor(
-            [(1 - math.cos((t / num_timesteps) * math.pi/2))**2 for t in range(num_timesteps)],
-            dtype=torch.float32
-        )
+
+def timestep_embedding(timesteps: torch.Tensor,
+                       dim: int,
+                       max_period: float = 10_000.0) -> torch.Tensor:
+    """Sinusoidal time embedding, exactly as in noencod_vilar_diffusion."""
+    if dim % 2 != 0:
+        raise ValueError("t_embed_dim doit être pair")
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(max_period)
+        * torch.arange(half, dtype=torch.float32, device=timesteps.device)
+        / half
+    )
+    angles = timesteps.float().unsqueeze(1) * freqs
+    return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+
+
+def noise_schedule(num_timesteps: int,
+                   beta_start: float = 1e-5,
+                   beta_end: float = 5e-3,
+                   schedule: str = "cosine"):
+    """Identique à noencod_vilar_diffusion."""
+    if schedule == "linear":
+        beta = torch.linspace(beta_start, beta_end, num_timesteps)
+    elif schedule == "quadratic":
+        beta = torch.linspace(beta_start**0.5, beta_end**0.5, num_timesteps) ** 2
+    elif schedule == "cosine":
+        beta = torch.tensor([
+            (1 - math.cos((t / num_timesteps) * math.pi / 2)) ** 2
+            for t in range(num_timesteps)
+        ], dtype=torch.float32)
     else:
-        raise ValueError(f"Unknown schedule type: {schedule}")
-    
+        raise ValueError(f"Unknown schedule: {schedule}")
+
     alpha = 1.0 - beta
     alpha_hat = torch.cumprod(alpha, dim=0)
-    
     return beta, alpha, alpha_hat
 
+
 class MLPDiffusionModel(nn.Module):
-    def __init__(self, theta_dim, y_dim, hidden_dim=256, num_timesteps=500):
-        super(MLPDiffusionModel, self).__init__()
+    def __init__(self,
+                 theta_dim: int,
+                 feature_dim: int = 15,
+                 hidden_dim: int = 256,
+                 num_layers: int = 4,
+                 num_timesteps: int = 500,
+                 t_embed_dim: int = 64):
+        super().__init__()
         self.theta_dim = theta_dim
-        self.y_dim = y_dim
+        self.feature_dim = feature_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
         self.num_timesteps = num_timesteps
-        
-        # Input dimension: theta + y + timestep
-        in_dim = theta_dim + y_dim + 1
-        
-        # Simple MLP with residual connections
-        self.layer1 = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LeakyReLU(0.1)
-        )
-        
-        self.layer2 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.1)
-        )
-        
-        self.layer3 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.1)
-        )
-        
-        self.layer4 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.1)
-        )
-        
+        self.t_embed_dim = t_embed_dim
+
+        # Projection d'entrée pour θ
+        self.input_proj = nn.Linear(theta_dim, hidden_dim)
+
+        # Blocs MLP résiduels
+        self.layers = nn.ModuleList([
+            nn.Sequential(nn.Linear(hidden_dim, hidden_dim),
+                          nn.LeakyReLU(0.1))
+            for _ in range(num_layers)
+        ])
+
+        # Prédit θ
         self.final = nn.Linear(hidden_dim, theta_dim)
-        
-        # Initialize noise schedule
+
+        # FiLM network : prédit gamme & biais pour chaque bloc et chaque dimension cachée
+        film_out = num_layers * hidden_dim * 2
+        self.film_net = nn.Sequential(
+            nn.Linear(feature_dim + t_embed_dim, hidden_dim),
+            nn.LeakyReLU(0.1),
+            nn.Linear(hidden_dim, film_out)
+        )
+
+        # Buffers du schedule de diffusion
         beta, alpha, alpha_hat = noise_schedule(num_timesteps)
-        self.register_buffer('beta', beta)
-        self.register_buffer('alpha', alpha)
-        self.register_buffer('alpha_hat', alpha_hat)
+        self.register_buffer("beta", beta)
+        self.register_buffer("alpha", alpha)
+        self.register_buffer("alpha_hat", alpha_hat)
 
-    def forward(self, theta, y, t):
-        # Scale timestep to [0,1]
-        t = t.float().unsqueeze(-1) / float(self.num_timesteps)
-        x = torch.cat([theta, y, t], dim=1)
-        
-        # Forward pass with residual connections
-        h1 = self.layer1(x)
-        h2 = self.layer2(h1) + h1
-        h3 = self.layer3(h2) + h2
-        h4 = self.layer4(h3) + h3
-        return self.final(h4)
+    def forward(self,
+                theta: torch.Tensor,  # (B, θ_dim)
+                y: torch.Tensor,      # (B, feature_dim), déjà encodé
+                t: torch.Tensor       # (B,) indices temporels
+                ) -> torch.Tensor:
+        # Embedding temporel
+        t_emb = timestep_embedding(t, self.t_embed_dim)  # (B, t_embed_dim)
+        # Condition concatenée
+        cond = torch.cat([y, t_emb], dim=1)               # (B, feature_dim + t_embed_dim)
 
-    def sample(self, N, y_observed, temperature=0.8):
-        with torch.no_grad():
-            # Initial noise from standard normal (matching forward process)
-            theta_samples = torch.randn((N, self.theta_dim), device=device) * temperature
-            
-            for t in reversed(range(self.num_timesteps-1, -1, -1)):
-                t_tensor = torch.full((N,), t, device=device, dtype=torch.long)
-                
-                alpha_hat_t = self.alpha_hat[t].unsqueeze(-1)
-                alpha_t = self.alpha[t].unsqueeze(-1)
-                beta_t = self.beta[t].unsqueeze(-1)
-                
-                # Predict noise
-                noise_pred = self.forward(theta_samples, y_observed, t_tensor)
-                
-                # Mean calculation matching forward process
-                mu_t = (theta_samples - (beta_t / torch.sqrt(1 - alpha_hat_t)) * noise_pred) / torch.sqrt(alpha_t)
-                
-                if t > 0:  # Only add noise if not the final step
-                    z = torch.randn_like(theta_samples) * temperature
-                    theta_samples = mu_t + torch.sqrt(beta_t) * z
-                else:
-                    theta_samples = mu_t
-                    
-            return theta_samples
+        # Générer gamma & beta
+        film = self.film_net(cond).view(-1, self.num_layers, 2, self.hidden_dim)
+        gammas = film[:, :, 0, :]   # (B, num_layers, hidden_dim)
+        betas  = film[:, :, 1, :]   # (B, num_layers, hidden_dim)
 
-def diffusion_loss(model, theta_0, y, num_timesteps, mse_loss):
-    batch_size = theta_0.size(0)
-    t = torch.randint(0, num_timesteps, (batch_size,), device=device)
-    noise = torch.randn_like(theta_0)
-    
-    alpha_hat_t = model.alpha_hat[t].unsqueeze(-1)
-    theta_noisy = torch.sqrt(alpha_hat_t) * theta_0 + torch.sqrt(1 - alpha_hat_t) * noise
-    
-    noise_pred = model(theta_noisy, y, t)
-    return mse_loss(noise_pred, noise)
+        # Passer θ dans le MLP résiduel avec modulation FiLM
+        h = self.input_proj(theta)
+        for i, layer in enumerate(self.layers):
+            h_prev = h
+            h = layer(h)
+            h = gammas[:, i] * h + betas[:, i]
+            h = h + h_prev
 
-def train_diffusion_model(model, train_loader, val_loader, num_epochs=1000, patience=20):
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        return self.final(h)
+
+    @torch.no_grad()
+    def sample(self, N: int, y: torch.Tensor, temperature: float = 1.0):
+        """
+        Génère N échantillons de θ conditionnés sur y via le processus inverse.
+        y: (N, feature_dim)
+        """
+        theta = torch.randn((N, self.theta_dim), device=y.device) * temperature
+        for t in reversed(range(self.num_timesteps)):
+            t_tensor = torch.full((N,), t, dtype=torch.long, device=y.device)
+            a_hat = self.alpha_hat[t].unsqueeze(-1)
+            a     = self.alpha[t].unsqueeze(-1)
+            b     = self.beta[t].unsqueeze(-1)
+
+            eps = self.forward(theta, y, t_tensor)
+            denom = torch.sqrt(torch.clamp(1.0 - a_hat, min=1e-8))
+            mu = (theta - (b / denom) * eps) / torch.sqrt(a)
+
+            if t > 0:
+                theta = mu + torch.sqrt(b) * torch.randn_like(theta) * temperature
+            else:
+                theta = mu
+        return theta
+
+
+def diffusion_loss(model: nn.Module,
+                   theta_0: torch.Tensor,
+                   y: torch.Tensor,
+                   num_timesteps: int,
+                   loss_fn: nn.Module) -> torch.Tensor:
+    """DDPM loss, identique à noencod_vilar_diffusion."""
+    B = theta_0.size(0)
+    t = torch.randint(0, num_timesteps, (B,), device=theta_0.device)
+    eps = torch.randn_like(theta_0)
+
+    a_hat = model.alpha_hat[t].unsqueeze(-1)
+    one_minus = torch.clamp(1.0 - a_hat, min=0.0)
+    theta_noisy = torch.sqrt(a_hat) * theta_0 + torch.sqrt(one_minus) * eps
+    eps_pred = model(theta_noisy, y, t)
+    return loss_fn(eps_pred, eps)
+
+
+def init_weights(m):
+    """Xavier init for linear layers."""
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        nn.init.zeros_(m.bias)
+
+
+def train_diffusion_model(model: nn.Module,
+                          train_loader: DataLoader,
+                          val_loader: DataLoader,
+                          num_epochs: int = 1000,
+                          patience: int = 20,
+                          learning_rate: float = 1e-3,
+                          weight_decay: float = 1e-4,
+                          lr_patience: int = 5,
+                          lr_factor: float = 0.5,
+                          min_lr: float = 1e-7):
+    """Entraîne avec early stopping et ReduceLROnPlateau."""
+    model.apply(init_weights)
+    opt = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=5,
-        cooldown=5,  # Increased cooldown period
-        min_lr=1e-7,
-        verbose=True  # Added verbosity for better monitoring
+        opt, mode='min', factor=lr_factor,
+        patience=lr_patience, cooldown=5, min_lr=min_lr
     )
-    
-    mse_loss = nn.MSELoss()
-    best_val_loss = float('inf')
-    best_model = None
-    counter = 0
-    train_losses = []
-    val_losses = []
-    
-    for epoch in range(num_epochs):
-        # Training
-        model.train()
-        epoch_train_loss = 0.0
-        for theta_batch, y_batch in train_loader:
-            theta_batch = theta_batch.to(device)
-            y_batch = y_batch.to(device)
-            
-            optimizer.zero_grad()
-            loss = diffusion_loss(model, theta_batch, y_batch, model.num_timesteps, mse_loss)
-            loss.backward()
-            optimizer.step()
-            
-            epoch_train_loss += loss.item()
-            
-        train_loss = epoch_train_loss / len(train_loader)
-        train_losses.append(train_loss)
-        
-        # Validation
-        model.eval()
-        epoch_val_loss = 0.0
-        with torch.no_grad():
-            for theta_batch, y_batch in val_loader:
-                theta_batch = theta_batch.to(device)
-                y_batch = y_batch.to(device)
-                loss = diffusion_loss(model, theta_batch, y_batch, model.num_timesteps, mse_loss)
-                epoch_val_loss += loss.item()
-                
-        val_loss = epoch_val_loss / len(val_loader)
-        val_losses.append(val_loss)
-        
-        # Learning rate scheduling
-        scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        print(f"Epoch [{epoch + 1}/{num_epochs}], "
-              f"Train Loss: {train_loss:.4f}, "
-              f"Val Loss: {val_loss:.4f}, "
-              f"LR: {current_lr:.6f}")
-        
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model = copy.deepcopy(model)
-            counter = 0
-        else:
-            counter += 1
-            if counter >= patience:
-                print("Early stopping triggered.")
-                model = best_model
-                break
-    
-    # Plot training curves
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_losses, label='Train Loss')
-    plt.plot(val_losses, label='Val Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Diffusion Training Progress')
-    plt.legend()
-    plt.savefig('diffusion_training.pdf')
-    plt.close()
-    
-    return best_model, train_losses, val_losses
+    loss_fn = nn.MSELoss()
+    best_val = float('inf')
+    best_net = None
+    wait = 0
+    train_losses, val_losses = [], []
 
-def create_dataloaders(theta, y, batch_size=64, train_split=0.9):
-    """Create train and validation dataloaders."""
-    # Convert to tensors
-    theta_tensor = torch.FloatTensor(theta)
-    y_tensor = torch.FloatTensor(y)
-    
-    # Create dataset
-    dataset = TensorDataset(theta_tensor, y_tensor)
-    
-    # Split sizes
-    train_size = int(train_split * len(dataset))
-    val_size = len(dataset) - train_size
-    
-    # Split dataset
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
-    
-    # Create dataloaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    
-    return train_loader, val_loader
+    for epoch in range(1, num_epochs + 1):
+        # entraînement
+        model.train()
+        running = 0.0
+        for θ, y in train_loader:
+            θ, y = θ.to(device), y.to(device)
+            loss = diffusion_loss(model, θ, y, model.num_timesteps, loss_fn)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            running += loss.item()
+        avg_tr = running / len(train_loader)
+        train_losses.append(avg_tr)
+
+        # validation
+        model.eval()
+        running = 0.0
+        with torch.no_grad():
+            for θ, y in val_loader:
+                θ, y = θ.to(device), y.to(device)
+                running += diffusion_loss(model, θ, y, model.num_timesteps, loss_fn).item()
+        avg_va = running / len(val_loader)
+        val_losses.append(avg_va)
+
+        scheduler.step(avg_va)
+        lr = opt.param_groups[0]['lr']
+        print(f"Epoch {epoch:4d} | train {avg_tr:.4f} | val {avg_va:.4f} | lr {lr:.2e}")
+
+        # early stopping
+        if avg_va < best_val:
+            best_val, best_net, wait = avg_va, copy.deepcopy(model), 0
+        else:
+            wait += 1
+            if wait >= patience:
+                print("★ Early-stopping")
+                break
+
+    # tracer pertes
+    plt.figure(figsize=(8,4))
+    plt.plot(train_losses, label='Train')
+    plt.plot(val_losses, label='Val')
+    plt.xlabel('Epoch'); plt.ylabel('MSE'); plt.legend()
+    plt.tight_layout(); plt.savefig('diffusion_training.pdf'); plt.close()
+
+    return best_net, train_losses, val_losses
+
+
+def create_dataloaders(theta: np.ndarray,
+                       y: np.ndarray,
+                       batch_size: int = 64,
+                       train_split: float = 0.9):
+    """
+    θ: np.ndarray (N, θ_dim)
+    y: np.ndarray (N, 15) vecteurs passés par votre autoencodeur
+    """
+    θ = torch.from_numpy(theta).float()
+    y = torch.from_numpy(y).float()
+    dataset = TensorDataset(θ, y)
+    n_train = int(train_split * len(dataset))
+    train_ds, val_ds = random_split(
+        dataset,
+        [n_train, len(dataset) - n_train],
+        generator=torch.Generator().manual_seed(42)
+    )
+    return (DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+            DataLoader(val_ds,   batch_size=batch_size))

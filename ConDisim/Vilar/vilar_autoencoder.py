@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 import copy
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -172,6 +173,7 @@ def train_autoencoder(ts_data_norm, device='cuda' if torch.cuda.is_available() e
     plt.plot(val_losses, label='Val Loss (AE)')
     plt.title('Autoencoder Reconstruction Loss')
     plt.legend()
+    os.makedirs('vilar_plots', exist_ok=True)
     plt.savefig('vilar_plots/autoencoder_loss.png')
     plt.close()
     
