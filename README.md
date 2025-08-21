@@ -1,5 +1,9 @@
 # Stage-L2-Uppsala
 
-Le fichier ConDiSim contient les codes qui m'ont étét envoyés par mon encadrant concernant l'algorithme ConDiSim.
+Le fichier ConDiSim/Vilar contient les codes de ConDiSim liés à l'oscillateur génétique.
 
-Le fichier ConDiSim/Vilar contient les codes liés à l'oscillateur génétique.
+Pipeline n°1 avec autoencodeur : 
+
+
+
+    
